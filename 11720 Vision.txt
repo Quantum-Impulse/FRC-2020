@@ -1,0 +1,211 @@
+#include <iostream>
+#include <opencv2/core.hpp>
+#include <opencv2/opencv.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/highgui.hpp>
+#include <opencv2/tracking.hpp>
+
+
+//manual horizontal viewing angle is 45.2 degrees. vertical viewing angle is 41.1 degrees
+using namespace std; using namespace cv;
+
+VideoCapture video(1);
+Mat videoFrame; //matrix for the video
+Mat videoHSV; //thresholded matrice of video+++++++++++++++++++++
+Mat videoThresholded; //mat for thresholded
+
+Rect bbox(0, 0, 0, 0); //bounding box
+
+vector<vector<Point>> contours;
+vector<Vec4i> hierarchy;
+Vec3b color;
+
+const double PI = 3.14159265;
+double yMidpoint = 240;
+double xMidpoint = 320;
+
+int iX, iY; int maxValueADP = 255; int C = 0; int blockSize = 21; //iX and iY represent coordinate points for the mosue callback. Other variables are for the adaptative threshold function
+
+//calculates distance using the distantce formula
+double distance(Point pt0, Point pt1)
+{
+	return sqrt(pow(pt1.x - pt0.x, 2) + pow(pt1.y - pt0.y, 2));
+}
+
+//Link to further explanation: https://docs.google.com/presentation/d/1ediRsI-oR3-kwawFJZ34_ZTlQS2SDBLjZasjzZ-eXbQ/pub?start=false&loop=false&slide=id.g12c083cffa_0_298
+double calculateYaw(double pixelX, double CenterX, double hFocalLength) 
+{
+	double yaw = (180/PI) * (atan((pixelX - CenterX) / hFocalLength));
+	return yaw;
+}
+
+//Link to further explanation: https://docs.google.com/presentation/d/1ediRsI-oR3-kwawFJZ34_ZTlQS2SDBLjZasjzZ-eXbQ/pub?start=false&loop=false&slide=id.g12c083cffa_0_298
+double calculatePitch(double pixelY, double  CenterY, double vFocalLength) 
+{
+	double pitch = (180/PI) * (atan((pixelY - CenterY) / vFocalLength));
+	//just stopped working have to do this:
+	pitch *= -1.0;
+	return pitch;
+}
+
+//returns the angle measure of the middle point as a double and degree
+double dAngle(Point pt0, Point pt1, Point pt2)
+{
+	double a = distance(pt0, pt1);
+	double b = distance(pt1, pt2);
+	double c = distance(pt2, pt0);
+	// C2 = A2 + B2 - 2AB cos(c) law of cosine, lowercase are sides, large case are angles. C is opposite angle of c side.
+	double C = acos((pow(a, 2) + pow(b, 2) - pow(c, 2)) / (2 * a * b)) * (180 / PI);
+	return C;
+}
+
+//mouse recall function. 
+void findRGB(int event, int x, int y, int flags, void* userdata)
+{
+	if (event == cv::EVENT_LBUTTONDOWN)
+
+	{
+		iX = x, iY = y;
+		color = videoFrame.at<cv::Vec3b>(cv::Point(iX, iY));
+		std::cout << "Left mouse clicked - Position (" << iX << ", " << iY << ")" << std::endl;
+	}
+}
+
+int main()
+{
+	double horizontalAspect = 16;
+	double verticalAspect = 9;
+	double diagonalAspect = hypot(horizontalAspect, verticalAspect);
+	double diagonalView = atan(diagonalAspect) * 2;
+
+	//Calculations: http://vrguy.blogspot.com/2013/04/converting-diagonal-field-of-view-and.html
+	double horizontalView = atan(tan(diagonalView / 2) * (horizontalAspect / diagonalAspect)) * 2;
+	double verticalView = atan(tan(diagonalView / 2) * (verticalAspect / diagonalAspect)) * 2;
+
+	video.read(videoFrame);
+
+	while (true)
+	{
+
+		//Focal Length calculations : https://docs.google.com/presentation/d/1ediRsI-oR3-kwawFJZ34_ZTlQS2SDBLjZasjzZ-eXbQ/pub?start=false&loop=false&slide=id.g12c083cffa_0_165
+		double H_FOCAL_LENGTH = videoFrame.rows / (2 * tan((horizontalView / 2)));
+		double V_FOCAL_LENGTH = videoFrame.cols / (2 * tan((verticalView / 2)));
+
+		double centerX = (videoFrame.rows / 2) - .5;
+		double centerY = (videoFrame.cols / 2) - .5;
+
+		bool objectIsTopGoal = false; bool objectIsFeederGoal = false;
+		vector<vector<Point>> feeder;
+		vector<vector<Point>> topGoal;
+		vector<Point> approx;
+		
+		video.read(videoFrame);
+		GaussianBlur(videoFrame, videoFrame, Size(5, 5), 0, 0);
+		Mat temp = videoFrame.clone(); //temp mat used during thresh
+
+		cvtColor(videoFrame, videoHSV, COLOR_BGR2HSV); //matrice/color converisons
+		cvtColor(videoFrame, videoThresholded, COLOR_BGR2GRAY);
+		
+		GaussianBlur(videoHSV, videoHSV, Size(5, 5), 0, 0);
+
+		imshow("HSV", videoHSV);
+		setMouseCallback("HSV", findRGB, 0); //mouse feedback. uses the findRGB function to do things. 
+		
+		inRange(videoFrame, (cv::Scalar(color.val[0], color.val[1], color.val[2]) - cv::Scalar(20, 20, 20)), (cv::Scalar(color.val[0], color.val[1], color.val[2]) + cv::Scalar(20, 20, 20)), videoThresholded); //sets pixel to black or white in a binary matrice when in the bounds of the scalar representing BGR, HSV or whatever or in this case HSV values. 
+		erode(videoThresholded, videoThresholded, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5))); //morphological closing.
+		dilate(videoThresholded, videoThresholded, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5)));
+		dilate(videoThresholded, videoThresholded, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5)));
+		erode(videoThresholded, videoThresholded, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5)));
+		temp.setTo(Scalar(0, 0, 0), ~videoThresholded); //we place the black parts of videoThreshold on temp matrice
+		videoThresholded = temp.clone(); //we make the thresholded image the temp matrice
+		cvtColor(videoThresholded, videoThresholded, COLOR_BGR2GRAY); //convert it to gray
+
+		adaptiveThreshold(videoThresholded, videoThresholded, maxValueADP, ADAPTIVE_THRESH_MEAN_C, THRESH_BINARY, blockSize, C); //final threshold
+
+		dilate(videoThresholded, videoThresholded, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(9, 9)));
+		dilate(videoThresholded, videoThresholded, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5)));
+
+		imshow("Thresholded", videoThresholded);
+
+		Mat videoContours = Mat::zeros(videoFrame.size().height, videoFrame.size().width, CV_8UC3);
+		findContours(videoThresholded, contours, hierarchy, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE); //find contours.
+		drawContours(videoContours, contours, -1, cv::Scalar(0, 255, 0), 3, LINE_AA, hierarchy, 3);
+		if (contours.size() > 0)
+		{
+			int iBreak = 0; //We only want to check for the first two contours so make a variable to check for this
+			for (vector<Point> i : contours) //for each loop
+			{
+				iBreak++;
+				if (iBreak == 2)
+				{
+					break;
+				}
+				approxPolyDP(i, approx, arcLength(i, true) * 0.02, true); //gives us the vertices of the shape
+				if (approx.size() >= 4 && fabs(contourArea(approx)) > 1000) //if statement determining whether there are more than 4 vertices, if the area of the contours is above 2000 and if the contours angles are less than 180 degrees
+				{
+					double maxAngle = 0;  //double to hold the max angle
+					for (int i = 0; i < (approx.size() - 2); i++) //checks for nearly every combination of angle to determine the largest angle in the polygon.
+					{
+						double angle = dAngle(approx[i], approx[i + 1], approx[i + 2]);
+						maxAngle = MAX(maxAngle, angle);
+					}
+					if (80.0 <= maxAngle && maxAngle <= 100.0) //if the max angle is ~90 degrees then it's a rectangle probably.
+					{
+						objectIsFeederGoal = true;
+						cout << "object feeder is true" << endl;
+						feeder.push_back(approx);
+					}
+					if (110.0 <= maxAngle && maxAngle <= 130.0) //if the max angle is ~120 degrees then it's probably a hexagon
+					{
+						objectIsTopGoal = true;
+						cout << "object goal is true" << endl;
+						topGoal.push_back(approx);
+					}
+				}
+			}
+		}
+		
+		if (objectIsTopGoal == true)  //if hexagon...
+		{
+			for (int i = 0; i < topGoal.size(); i++) //for loop drawing lines between the approximated vertices found in approxpolydp function earlier.
+			{
+				const Point* tp = &topGoal[i][0];
+				int n = (int)topGoal[i].size();
+				polylines(videoFrame, &tp, &n, 1, true, Scalar(0, 0, 255), 3, LINE_AA);
+			}
+			bbox = boundingRect(contours[0]); //the lines below simply create a bounding box and the centroid and raw them and output the yaw and pitch
+			rectangle(videoFrame, bbox, Scalar(255, 0, 0), 2, 8, 0);
+			Point* centroid = new Point(bbox.x + (bbox.width / 2), bbox.y + (bbox.height / 2));
+			circle(videoFrame, *centroid, 4, Scalar(0, 0, 255), FILLED, 8, 0);
+			cout << "Yaw: " << calculateYaw(centroid->x, xMidpoint, H_FOCAL_LENGTH) << endl;
+			cout << "Pitch: " << calculatePitch(centroid->y, yMidpoint, V_FOCAL_LENGTH) << endl;
+			cout << "Hexagon detected" << endl;
+			delete centroid;
+		}
+		if (objectIsFeederGoal == true) //if hexagon
+		{
+			for (int i = 0; i < feeder.size(); i++)
+			{
+				const Point* tp = &feeder[i][0];
+				int n = (int)feeder[i].size();
+				polylines(videoFrame, &tp, &n, 1, true, Scalar(0, 0, 255), 1, LINE_AA);
+			}
+			bbox = boundingRect(feeder[0]); //the lines below simply create a bounding box and the centroid and raw them and output the yaw and pitch
+			rectangle(videoFrame, bbox, Scalar(0, 0, 255), 2, 8, 0);
+			Point* centroid = new Point(bbox.x + (bbox.width / 2), bbox.y + (bbox.height / 2));
+			circle(videoFrame, *centroid, 4, Scalar(255, 0, 0), FILLED, 8, 0);
+			cout << "Yaw: " << calculateYaw(centroid->x, xMidpoint, H_FOCAL_LENGTH) << endl;
+			cout << "Pitch: " << calculatePitch(centroid->y, yMidpoint, V_FOCAL_LENGTH) << endl;
+			cout << "Rectangle detected" << endl;
+			delete centroid;
+		}
+
+		imshow("videoContours", videoContours);
+		imshow("Video", videoFrame);
+
+		if (waitKey(1) == 27)
+		{
+			break;
+		}
+	}
+}
